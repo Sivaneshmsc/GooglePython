@@ -271,7 +271,7 @@ class TransferRunPartnerClient(object):
         api_prefix_fxn = self._api_client.projects().locations().transferConfigs().runs()
         api_fxn = getattr(api_prefix_fxn, method_name)
 
-        api_params = kwargs.deepcopy()
+        api_params = kwargs.copy()
         api_params['projectId'] = self.project_id
         api_params['locationId'] = self.location_id
         api_params['config_id'] = self.config_id

@@ -27,6 +27,7 @@ from google.cloud import bigquery
 from google.cloud import pubsub
 from google.cloud import storage
 from google.cloud import exceptions
+from google.cloud.bigquery import LoadJobConfig
 
 def _regex_parser(parser_regex, fields):
     def _parse(current_str):
@@ -73,6 +74,7 @@ BQ_DTS_FORMAT_TO_BQ_SOURCE_FORMAT_MAP = {
 def date_from_timestamp(in_timestamp):
     return datetime.datetime.fromtimestamp(in_timestamp)
 
+
 def _raw_field_to_fieldschema(raw_field):
     out_field = dict()
     out_field['field_name'] = raw_field['name']
@@ -93,9 +95,12 @@ def _raw_fields_to_record(raw_fields):
     return api_client.RecordSchema(fields=fields)
 
 
-class BaseDataSource(object):
+class BaseSource(object):
     # Table prefix with date_suffix
     # TODO - String together BQ DTS logger and local logger
+    # TODO - Dynamically determine local scratch dir based on run-name
+    # TODO - Dynamically determine scratch GCS bucket based on location + source
+
     TABLES = list()
     _TABLES_MAP = dict()
 
@@ -303,17 +308,16 @@ class BaseDataSource(object):
 
         # Step 2 - Ensure the target Dataset exists
         dataset_id = current_run['destinationDatasetId']
-        dataset = self.bq_client.dataset(dataset_id)
-        assert dataset.exists()
+        dataset_ref = self.bq_client.dataset(dataset_id)
 
         # Step 3 - Trigger multiple BigQuery Load jobs based on the ImportedDataInfo
         for current_idi in run_idis:
-            self.load_table_via_bq_load_job(dataset, current_idi)
+            self.load_table_via_bq_load_job(dataset_ref, current_idi)
 
-    def load_table_via_bq_load_job(self, tgt_dataset, current_idi):
+    def load_table_via_bq_load_job(self, dataset_ref, current_idi):
         """
         Assumes staged data is
-        :param tgt_dataset:
+        :param dataset_ref:
         :param current_idi:
         :return:
         """
@@ -323,9 +327,10 @@ class BaseDataSource(object):
         tgt_schema = api_client.RecordSchema_to_GCloudSchema(tgt_tabledef['schema'])
 
         # Step 2 - Create target table if it doesn't exist
-        tgt_table = tgt_dataset.table(tgt_table_name, tgt_schema)
+        table_ref = dataset_ref.table(tgt_table_name)
+        tgt_table = bigquery.Table(table_ref, schema=tgt_schema)
         if not tgt_table.exists():
-            tgt_table.create()
+            tgt_table = self.bq_client.create_table(tgt_table)
 
         # Step 3 - Create a BigQuery Load Job based on the URIs
         src_uris = tgt_tabledef['sourceUris']
@@ -333,22 +338,20 @@ class BaseDataSource(object):
 
         # https://googlecloudplatform.github.io/google-cloud-python/latest/_modules/google/cloud/bigquery/client.html#Client.load_table_from_uri
         # https://googlecloudplatform.github.io/google-cloud-python/latest/bigquery/reference.html#google.cloud.bigquery.job.LoadJob
-
-        job = self.bq_client.load_table_from_uri(source_uris=src_uris, destination=tgt_table, job_id=job_name)
+        job_config = LoadJobConfig()
 
         # NOTE - Source Format from BQ DTS does NOT match BQ SourceFormat, why did we re-create these?
         # BQ DTS -  https://cloud.google.com/bigquery/docs/reference/data-transfer/partner/rest/v1/projects.locations.transferConfigs.runs/startBigQueryJobs#Format
         # BQ Load - https://cloud.google.com/bigquery/docs/reference/rest/v2/jobs#configuration.load.sourceFormat
         source_format = BQ_DTS_FORMAT_TO_BQ_SOURCE_FORMAT_MAP[tgt_tabledef['format']]
-
         assert source_format is not None
-        job.source_format = source_format
+        job_config.source_format = source_format
+        job_config.write_disposition = bigquery.WriteDisposition.WRITE_TRUNCATE
 
-        # https://cloud.google.com/bigquery/docs/reference/rest/v2/jobs#configuration.load.writeDisposition
-        job.write_disposition = bigquery.WriteDisposition.WRITE_TRUNCATE
+        load_job = self.bq_client.load_table_from_uri(source_uris=src_uris, destination=tgt_table,
+            job_id=job_name, job_config=job_config)
 
-        job.result()
-        return job_name
+        return load_job
 
     ##### END - Methods  for self-managed loads #####
 
