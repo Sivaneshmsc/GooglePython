@@ -1,3 +1,5 @@
+.DS_Store
+.idea
 .coveralls.yml
 *.pyc
 .coverage
